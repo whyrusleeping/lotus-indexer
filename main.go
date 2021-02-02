@@ -197,12 +197,11 @@ func (ix *Indexer) clearTipSet(ts *types.TipSet) error {
 }
 
 type APIMessage struct {
-	Cid  string
-	From string
-	To   string
+	Cid  string `json:"cid"`
+	From string `json:"from"`
+	To   string `json:"to"`
 
-	InclTs     types.TipSetKey
-	InclHeight uint64
+	InclHeight uint64 `json:"incl_height"`
 }
 
 func (ix *Indexer) MessagesCount() (int64, error) {
@@ -346,6 +345,11 @@ var runCmd = &cli.Command{
 			Name:  "listen",
 			Usage: "host address and port the api server will listen on",
 			Value: "0.0.0.0:2347",
+		},
+		&cli.IntFlag{
+			Name:  "no-index-before",
+			Usage: "dont index tipsets before the given height",
+			Value: 350000,
 		},
 	},
 	Action: func(cctx *cli.Context) error {
