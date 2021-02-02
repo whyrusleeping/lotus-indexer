@@ -3,24 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/filecoin-project/go-address"
 	"golang.org/x/xerrors"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
+	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/types"
 	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/filecoin-project/lotus/lib/lotuslog"
 
-	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log"
 
-	"github.com/gorilla/mux"
+	"github.com/labstack/echo/v4"
 	"github.com/urfave/cli/v2"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -28,21 +27,21 @@ import (
 	"gorm.io/gorm"
 )
 
-var log = logging.Logger("gateway")
+var log = logging.Logger("indexer")
 
 type Message struct {
 	gorm.Model
-	Cid        cid.Cid
-	To         address.Address
-	From       address.Address
-	InclHeight int64
-	InclTs     types.TipSetKey
+	Cid        string
+	To         string
+	From       string
+	InclHeight uint64
+	InclTsID   uint
 }
 
 type Receipt struct {
 	gorm.Model
-	Msg    cid.Cid
-	InclTs types.TipSetKey
+	Msg      string
+	InclTsID uint
 
 	ExitCode int64
 	Return   []byte
@@ -51,7 +50,7 @@ type Receipt struct {
 
 type TipSet struct {
 	gorm.Model
-	Key       types.TipSetKey
+	Key       string
 	Processed bool
 }
 
@@ -95,23 +94,30 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 		return err
 	}
 
-	tsk := ts.Key()
+	dbts := &TipSet{
+		Key:       ts.Key().String(),
+		Processed: true,
+	}
+	if err := ix.db.Create(dbts).Error; err != nil {
+		return xerrors.Errorf("inserting new tipset into database failed: %w", err)
+	}
+
 	msgs := make([]Message, 0, len(pmsgs))
 	recpts := make([]Receipt, 0, len(precpts))
 	for i, m := range pmsgs {
 		msg := Message{
-			Cid:        m.Cid,
-			To:         m.Message.To,
-			From:       m.Message.From,
-			InclHeight: int64(ts.Height()),
-			InclTs:     tsk,
+			Cid:        m.Cid.String(),
+			To:         m.Message.To.String(),
+			From:       m.Message.From.String(),
+			InclHeight: uint64(ts.Height()),
+			InclTsID:   dbts.ID,
 		}
 
 		msgs = append(msgs, msg)
 
 		rec := Receipt{
-			Msg:    m.Cid,
-			InclTs: tsk,
+			Msg:      m.Cid.String(),
+			InclTsID: dbts.ID,
 
 			ExitCode: int64(precpts[i].ExitCode),
 			Return:   precpts[i].Return,
@@ -134,27 +140,24 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 
 func (ix *Indexer) indexedTipSet(ts *types.TipSet) (bool, error) {
 	var count int64
-	if err := ix.db.Model(&TipSet{}).Where("key = ?", ts.Key()).Count(&count).Error; err != nil {
+	if err := ix.db.Model(&TipSet{}).Where("key = ?", ts.Key().String()).Count(&count).Error; err != nil {
 		return false, err
 	}
 
 	return count >= 1, nil
 }
 
-func (ix *Indexer) crawlBack(cur *types.TipSet) error {
-	ctx := context.TODO()
+func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
 	for cur.Height() > 0 {
 		start := time.Now()
 		done, err := ix.indexedTipSet(cur)
 		if err != nil {
 			return err
 		}
-		if done {
-			continue
-		}
-
-		if err := ix.processTipSet(ctx, cur); err != nil {
-			return err
+		if !done {
+			if err := ix.processTipSet(ctx, cur); err != nil {
+				return err
+			}
 		}
 
 		next, err := ix.api.ChainGetTipSet(ctx, cur.Parents())
@@ -169,8 +172,88 @@ func (ix *Indexer) crawlBack(cur *types.TipSet) error {
 	return nil
 }
 
-func (ix *Indexer) Run() error {
-	sub, err := ix.api.ChainNotify(context.TODO())
+func (ix *Indexer) clearTipSet(ts *types.TipSet) error {
+	var tipset TipSet
+	if err := ix.db.Where("key = ?", ts.Key().String()).First(&tipset).Error; err != nil {
+		if xerrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return xerrors.Errorf("failed to find entry for tipset in db: %w", err)
+	}
+
+	if err := ix.db.Where("incl_ts_id = ?", tipset.ID).Delete(&Message{}).Error; err != nil {
+		return xerrors.Errorf("failed to delete messages in clear tipset: %w", err)
+	}
+
+	if err := ix.db.Where("incl_ts_id = ?", tipset.ID).Delete(&Receipt{}).Error; err != nil {
+		return xerrors.Errorf("failed to delete receipts in clear tipset: %w", err)
+	}
+
+	if err := ix.db.Where("id = ?", tipset.ID).Delete(&TipSet{}).Error; err != nil {
+		return xerrors.Errorf("failed to delete tipset marker in clear tipset: %w", err)
+	}
+
+	return nil
+}
+
+type APIMessage struct {
+	Cid  string
+	From string
+	To   string
+
+	InclTs     types.TipSetKey
+	InclHeight uint64
+}
+
+func (ix *Indexer) MessagesCount() (int64, error) {
+	var count int64
+	if err := ix.db.Model(&Message{}).Count(&count).Error; err != nil {
+		return 0, xerrors.Errorf("failed to find messages to target: %w", err)
+	}
+
+	return count, nil
+}
+
+func (ix *Indexer) MessagesTo(addr address.Address) ([]APIMessage, error) {
+	var messages []Message
+	if err := ix.db.Where("`to` = ?", addr.String()).Find(&messages).Error; err != nil {
+		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
+	}
+
+	out := make([]APIMessage, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, APIMessage{
+			Cid:        m.Cid,
+			From:       m.From,
+			To:         m.To,
+			InclHeight: m.InclHeight,
+		})
+	}
+
+	return out, nil
+}
+
+func (ix *Indexer) MessagesFrom(addr address.Address) ([]APIMessage, error) {
+	var messages []Message
+	if err := ix.db.Where("`from` = ?", addr.String()).Find(&messages).Error; err != nil {
+		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
+	}
+
+	out := make([]APIMessage, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, APIMessage{
+			Cid:        m.Cid,
+			From:       m.From,
+			To:         m.To,
+			InclHeight: m.InclHeight,
+		})
+	}
+
+	return out, nil
+}
+
+func (ix *Indexer) Run(ctx context.Context) error {
+	sub, err := ix.api.ChainNotify(ctx)
 	if err != nil {
 		return err
 	}
@@ -180,15 +263,48 @@ func (ix *Indexer) Run() error {
 	curts := first[0].Val
 
 	go func() {
-		if err := ix.crawlBack(curts); err != nil {
+		if err := ix.crawlBack(ctx, curts); err != nil {
 			log.Errorf("failed to crawl chain back: %s", err)
 		}
 	}()
 
-	for hc := range sub {
-		_ = hc
+	hcc := store.NewHeadChangeCoalescer(func(rev, app []*types.TipSet) error {
+		for _, ts := range rev {
+			fmt.Printf("Revert: %s\n", ts.Key())
 
-	}
+			if err := ix.clearTipSet(ts); err != nil {
+				log.Errorf("handling reverted tipset: %w", err)
+			}
+		}
+
+		for _, ts := range app {
+			fmt.Printf("Apply: %s\n", ts.Key())
+			start := time.Now()
+			if err := ix.processTipSet(ctx, ts); err != nil {
+				return xerrors.Errorf("failed to process tipset: %w", err)
+			}
+			fmt.Printf("processing tipset %d took: %s\n", ts.Height(), time.Since(start))
+		}
+
+		return nil
+	}, time.Second*10, time.Second*30, time.Second*5)
+
+	go func() {
+		for hc := range sub {
+			var rev, app []*types.TipSet
+			for _, upd := range hc {
+				switch upd.Type {
+				case "revert":
+					rev = append(rev, upd.Val)
+				case "apply":
+					app = append(app, upd.Val)
+				}
+			}
+			if err := hcc.HeadChange(rev, app); err != nil {
+				log.Errorf("head change failed: %w", err)
+			}
+		}
+	}()
 
 	return nil
 }
@@ -201,8 +317,8 @@ func main() {
 	}
 
 	app := &cli.App{
-		Name:    "lotus-gateway",
-		Usage:   "Public API server for lotus",
+		Name:    "lotus-indexer",
+		Usage:   "Simple message indexer for lotus",
 		Version: build.UserVersion(),
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -229,7 +345,7 @@ var runCmd = &cli.Command{
 		&cli.StringFlag{
 			Name:  "listen",
 			Usage: "host address and port the api server will listen on",
-			Value: "0.0.0.0:2346",
+			Value: "0.0.0.0:2347",
 		},
 	},
 	Action: func(cctx *cli.Context) error {
@@ -250,40 +366,64 @@ var runCmd = &cli.Command{
 			return err
 		}
 
-		if err := ix.Run(); err != nil {
+		if err := ix.Run(ctx); err != nil {
 			return err
 		}
 
-		address := cctx.String("listen")
-		mux := mux.NewRouter()
+		e := echo.New()
+		e.GET("/index/msgs/to/:addr", func(c echo.Context) error {
+			addr := c.Param("addr")
+			a, err := address.NewFromString(addr)
+			if err != nil {
+				return err
+			}
 
-		log.Info("Setting up API endpoint at " + address)
+			msgs, err := ix.MessagesTo(a)
+			if err != nil {
+				return err
+			}
 
-		mux.PathPrefix("/").Handler(http.DefaultServeMux)
+			return c.JSON(http.StatusOK, msgs)
+		})
 
-		/*ah := &auth.Handler{
-			Verify: nodeApi.AuthVerify,
-			Next:   mux.ServeHTTP,
-		}*/
+		e.GET("/index/msgs/from/:addr", func(c echo.Context) error {
+			addr := c.Param("addr")
+			a, err := address.NewFromString(addr)
+			if err != nil {
+				return err
+			}
 
-		srv := &http.Server{
-			Handler: mux,
-		}
+			msgs, err := ix.MessagesFrom(a)
+			if err != nil {
+				return err
+			}
+
+			return c.JSON(http.StatusOK, msgs)
+		})
+
+		e.GET("/index/msgs/count", func(c echo.Context) error {
+			count, err := ix.MessagesCount()
+			if err != nil {
+				return err
+			}
+
+			return c.JSON(http.StatusOK, map[string]interface{}{
+				"num_messages": count,
+			})
+		})
 
 		go func() {
 			<-ctx.Done()
 			log.Warn("Shutting down...")
-			if err := srv.Shutdown(context.TODO()); err != nil {
+
+			if err := e.Close(); err != nil {
 				log.Errorf("shutting down indexer server failed: %s", err)
+			} else {
+				log.Warn("Graceful shutdown successful")
 			}
-			log.Warn("Graceful shutdown successful")
 		}()
 
-		nl, err := net.Listen("tcp", address)
-		if err != nil {
-			return err
-		}
-
-		return srv.Serve(nl)
+		address := cctx.String("listen")
+		return e.Start(address)
 	},
 }

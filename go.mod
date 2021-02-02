@@ -8,6 +8,7 @@ require (
 	github.com/gorilla/mux v1.8.0
 	github.com/ipfs/go-cid v0.0.7
 	github.com/ipfs/go-log v1.0.4
+	github.com/labstack/echo/v4 v4.1.17
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/urfave/cli/v2 v2.3.0
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
