@@ -213,9 +213,28 @@ func (ix *Indexer) MessagesCount() (int64, error) {
 	return count, nil
 }
 
+func (ix *Indexer) MessagesFor(addr address.Address, limit int) ([]APIMessage, error) {
+	var messages []Message
+	if err := ix.db.Limit(limit).Order("incl_height desc").Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).Find(&messages).Error; err != nil {
+		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
+	}
+
+	out := make([]APIMessage, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, APIMessage{
+			Cid:        m.Cid,
+			From:       m.From,
+			To:         m.To,
+			InclHeight: m.InclHeight,
+		})
+	}
+
+	return out, nil
+}
+
 func (ix *Indexer) MessagesTo(addr address.Address) ([]APIMessage, error) {
 	var messages []Message
-	if err := ix.db.Where("`to` = ?", addr.String()).Find(&messages).Error; err != nil {
+	if err := ix.db.Order("incl_height desc").Where("`to` = ?", addr.String()).Find(&messages).Error; err != nil {
 		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
 	}
 
@@ -234,7 +253,7 @@ func (ix *Indexer) MessagesTo(addr address.Address) ([]APIMessage, error) {
 
 func (ix *Indexer) MessagesFrom(addr address.Address) ([]APIMessage, error) {
 	var messages []Message
-	if err := ix.db.Where("`from` = ?", addr.String()).Find(&messages).Error; err != nil {
+	if err := ix.db.Order("incl_height desc").Where("`from` = ?", addr.String()).Find(&messages).Error; err != nil {
 		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
 	}
 
@@ -398,6 +417,21 @@ var runCmd = &cli.Command{
 			}
 
 			msgs, err := ix.MessagesFrom(a)
+			if err != nil {
+				return err
+			}
+
+			return c.JSON(http.StatusOK, msgs)
+		})
+
+		e.GET("/index/msgs/for/:addr", func(c echo.Context) error {
+			addr := c.Param("addr")
+			a, err := address.NewFromString(addr)
+			if err != nil {
+				return err
+			}
+
+			msgs, err := ix.MessagesFor(a, 200)
 			if err != nil {
 				return err
 			}
