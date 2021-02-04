@@ -36,12 +36,13 @@ type Message struct {
 	From       string
 	InclHeight uint64
 	InclTsID   uint
+
+	ReceiptID uint
 }
 
 type Receipt struct {
 	gorm.Model
-	Msg      string
-	InclTsID uint
+	Msg Message
 
 	ExitCode int64
 	Return   []byte
@@ -102,7 +103,7 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 		return xerrors.Errorf("inserting new tipset into database failed: %w", err)
 	}
 
-	msgs := make([]Message, 0, len(pmsgs))
+	//msgs := make([]Message, 0, len(pmsgs))
 	recpts := make([]Receipt, 0, len(precpts))
 	for i, m := range pmsgs {
 		msg := Message{
@@ -113,11 +114,8 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 			InclTsID:   dbts.ID,
 		}
 
-		msgs = append(msgs, msg)
-
 		rec := Receipt{
-			Msg:      m.Cid.String(),
-			InclTsID: dbts.ID,
+			Msg: msg,
 
 			ExitCode: int64(precpts[i].ExitCode),
 			Return:   precpts[i].Return,
@@ -127,9 +125,11 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 		recpts = append(recpts, rec)
 	}
 
-	if err := ix.db.Create(msgs).Error; err != nil {
-		return xerrors.Errorf("inserting new messages into database failed: %w", err)
-	}
+	/*
+		if err := ix.db.Create(msgs).Error; err != nil {
+			return xerrors.Errorf("inserting new messages into database failed: %w", err)
+		}
+	*/
 
 	if err := ix.db.Create(recpts).Error; err != nil {
 		return xerrors.Errorf("inserting new receipts into database failed: %w", err)
@@ -158,6 +158,8 @@ func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
 			if err := ix.processTipSet(ctx, cur); err != nil {
 				return err
 			}
+		} else {
+			//return nil
 		}
 
 		next, err := ix.api.ChainGetTipSet(ctx, cur.Parents())
@@ -196,12 +198,20 @@ func (ix *Indexer) clearTipSet(ts *types.TipSet) error {
 	return nil
 }
 
+type APIReceipt struct {
+	ExitCode int64  `json:"exit_code"`
+	Return   []byte `json:"return"`
+	GasUsed  int64  `json:"gas_used"`
+}
+
 type APIMessage struct {
 	Cid  string `json:"cid"`
 	From string `json:"from"`
 	To   string `json:"to"`
 
 	InclHeight uint64 `json:"incl_height"`
+
+	Receipt *APIReceipt `json:"receipt,omitempty"`
 }
 
 func (ix *Indexer) MessagesCount() (int64, error) {
@@ -214,18 +224,43 @@ func (ix *Indexer) MessagesCount() (int64, error) {
 }
 
 func (ix *Indexer) MessagesFor(addr address.Address, limit int) ([]APIMessage, error) {
-	var messages []Message
-	if err := ix.db.Limit(limit).Order("incl_height desc").Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).Find(&messages).Error; err != nil {
-		return nil, xerrors.Errorf("failed to find messages to target: %w", err)
-	}
 
-	out := make([]APIMessage, 0, len(messages))
-	for _, m := range messages {
+	/*
+		var messages []Message
+		if err := ix.db.Limit(limit).Order("incl_height desc").Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).Find(&messages).Error; err != nil {
+			return nil, xerrors.Errorf("failed to find messages to target: %w", err)
+		}
+	*/
+
+	type Result struct {
+		Message
+		Receipt
+	}
+	var results []Result
+	txn := ix.db.Model(&Message{}).
+		Limit(limit).
+		Order("incl_height desc").
+		Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).
+		Select("messages.*, receipts.*").
+		Joins("left join receipts on receipts.id = messages.receipt_id").
+		Find(&results)
+	if err := txn.Error; err != nil {
+		return nil, xerrors.Errorf("messages for address query failed: %w", err)
+	}
+	// SELECT users.name, emails.email FROM `users` left join emails on emails.user_id = users.id
+
+	out := make([]APIMessage, 0, len(results))
+	for _, r := range results {
 		out = append(out, APIMessage{
-			Cid:        m.Cid,
-			From:       m.From,
-			To:         m.To,
-			InclHeight: m.InclHeight,
+			Cid:        r.Cid,
+			From:       r.From,
+			To:         r.To,
+			InclHeight: r.InclHeight,
+			Receipt: &APIReceipt{
+				ExitCode: r.Receipt.ExitCode,
+				Return:   r.Receipt.Return,
+				GasUsed:  r.Receipt.GasUsed,
+			},
 		})
 	}
 
