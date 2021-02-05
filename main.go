@@ -37,13 +37,6 @@ type Message struct {
 	InclHeight uint64
 	InclTsID   uint
 
-	ReceiptID uint
-}
-
-type Receipt struct {
-	gorm.Model
-	Msg Message
-
 	ExitCode int64
 	Return   []byte
 	GasUsed  int64
@@ -67,10 +60,6 @@ func NewIndexer(api api.FullNode, dbpath string) (*Indexer, error) {
 	}
 
 	if err := db.AutoMigrate(&Message{}); err != nil {
-		return nil, err
-	}
-
-	if err := db.AutoMigrate(&Receipt{}); err != nil {
 		return nil, err
 	}
 
@@ -103,8 +92,7 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 		return xerrors.Errorf("inserting new tipset into database failed: %w", err)
 	}
 
-	//msgs := make([]Message, 0, len(pmsgs))
-	recpts := make([]Receipt, 0, len(precpts))
+	msgs := make([]Message, 0, len(pmsgs))
 	for i, m := range pmsgs {
 		msg := Message{
 			Cid:        m.Cid.String(),
@@ -112,27 +100,17 @@ func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
 			From:       m.Message.From.String(),
 			InclHeight: uint64(ts.Height()),
 			InclTsID:   dbts.ID,
-		}
-
-		rec := Receipt{
-			Msg: msg,
 
 			ExitCode: int64(precpts[i].ExitCode),
 			Return:   precpts[i].Return,
 			GasUsed:  precpts[i].GasUsed,
 		}
 
-		recpts = append(recpts, rec)
+		msgs = append(msgs, msg)
 	}
 
-	/*
-		if err := ix.db.Create(msgs).Error; err != nil {
-			return xerrors.Errorf("inserting new messages into database failed: %w", err)
-		}
-	*/
-
-	if err := ix.db.Create(recpts).Error; err != nil {
-		return xerrors.Errorf("inserting new receipts into database failed: %w", err)
+	if err := ix.db.Create(msgs).Error; err != nil {
+		return xerrors.Errorf("inserting new messages into database failed: %w", err)
 	}
 
 	return nil
@@ -187,10 +165,6 @@ func (ix *Indexer) clearTipSet(ts *types.TipSet) error {
 		return xerrors.Errorf("failed to delete messages in clear tipset: %w", err)
 	}
 
-	if err := ix.db.Where("incl_ts_id = ?", tipset.ID).Delete(&Receipt{}).Error; err != nil {
-		return xerrors.Errorf("failed to delete receipts in clear tipset: %w", err)
-	}
-
 	if err := ix.db.Where("id = ?", tipset.ID).Delete(&TipSet{}).Error; err != nil {
 		return xerrors.Errorf("failed to delete tipset marker in clear tipset: %w", err)
 	}
@@ -232,17 +206,11 @@ func (ix *Indexer) MessagesFor(addr address.Address, limit int) ([]APIMessage, e
 		}
 	*/
 
-	type Result struct {
-		Message
-		Receipt
-	}
-	var results []Result
+	var results []Message
 	txn := ix.db.Model(&Message{}).
 		Limit(limit).
 		Order("incl_height desc").
 		Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).
-		Select("messages.*, receipts.*").
-		Joins("left join receipts on receipts.id = messages.receipt_id").
 		Find(&results)
 	if err := txn.Error; err != nil {
 		return nil, xerrors.Errorf("messages for address query failed: %w", err)
@@ -257,9 +225,9 @@ func (ix *Indexer) MessagesFor(addr address.Address, limit int) ([]APIMessage, e
 			To:         r.To,
 			InclHeight: r.InclHeight,
 			Receipt: &APIReceipt{
-				ExitCode: r.Receipt.ExitCode,
-				Return:   r.Receipt.Return,
-				GasUsed:  r.Receipt.GasUsed,
+				ExitCode: r.ExitCode,
+				Return:   r.Return,
+				GasUsed:  r.GasUsed,
 			},
 		})
 	}
