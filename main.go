@@ -158,6 +158,11 @@ func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
 			return err
 		}
 
+		_, err = ix.api.ChainReadObj(ctx, next.Blocks()[0].Messages)
+		if err != nil {
+			return err
+		}
+
 		cur = next
 	}
 
