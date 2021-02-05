@@ -12,6 +12,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/urfave/cli/v2 v2.3.0
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
+	gorm.io/driver/postgres v1.0.8
 	gorm.io/driver/sqlite v1.1.4
 	gorm.io/gorm v1.20.12
 )

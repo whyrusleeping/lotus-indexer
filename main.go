@@ -23,6 +23,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -53,8 +54,8 @@ type Indexer struct {
 	db  *gorm.DB
 }
 
-func NewIndexer(api api.FullNode, dbpath string) (*Indexer, error) {
-	db, err := gorm.Open(sqlite.Open(dbpath), &gorm.Config{})
+func NewIndexer(api api.FullNode, dbd gorm.Dialector) (*Indexer, error) {
+	db, err := gorm.Open(dbd, &gorm.Config{})
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +159,7 @@ func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
 			return err
 		}
 
-		_, err = ix.api.ChainReadObj(ctx, next.Blocks()[0].Messages)
+		_, err = ix.api.ChainReadObj(ctx, next.Blocks()[0].ParentStateRoot)
 		if err != nil {
 			return err
 		}
@@ -227,7 +228,7 @@ func (ix *Indexer) MessagesFor(addr address.Address, limit int) ([]APIMessage, e
 	txn := ix.db.Model(&Message{}).
 		Limit(limit).
 		Order("incl_height desc").
-		Where("`to` = ? OR `from` = ?", addr.String(), addr.String()).
+		Where("\"to\" = ? OR \"from\" = ?", addr.String(), addr.String()).
 		Find(&results)
 	if err := txn.Error; err != nil {
 		return nil, xerrors.Errorf("messages for address query failed: %w", err)
@@ -390,6 +391,10 @@ var runCmd = &cli.Command{
 			Usage: "dont index tipsets before the given height",
 			Value: 350000,
 		},
+		&cli.StringFlag{
+			Name:  "postgres",
+			Usage: "specify postgres database connection string",
+		},
 	},
 	Action: func(cctx *cli.Context) error {
 		log.Info("Starting lotus indexer")
@@ -404,7 +409,14 @@ var runCmd = &cli.Command{
 		}
 		defer closer()
 
-		ix, err := NewIndexer(api, "funtimes.db")
+		var dbd gorm.Dialector
+		if psql := cctx.String("postgres"); psql != "" {
+			dbd = postgres.Open(psql)
+		} else {
+			dbd = sqlite.Open(cctx.String("sqlite"))
+		}
+
+		ix, err := NewIndexer(api, dbd)
 		if err != nil {
 			return err
 		}
