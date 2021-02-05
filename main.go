@@ -32,8 +32,8 @@ var log = logging.Logger("indexer")
 type Message struct {
 	gorm.Model
 	Cid        string
-	To         string
-	From       string
+	To         string `gorm:"index"`
+	From       string `gorm:"index"`
 	InclHeight uint64
 	InclTsID   uint
 
