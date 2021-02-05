@@ -126,26 +126,38 @@ func (ix *Indexer) indexedTipSet(ts *types.TipSet) (bool, error) {
 }
 
 func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
-	for cur.Height() > 0 {
-		start := time.Now()
-		done, err := ix.indexedTipSet(cur)
-		if err != nil {
-			return err
-		}
-		if !done {
-			if err := ix.processTipSet(ctx, cur); err != nil {
-				return err
-			}
-		} else {
-			//return nil
-		}
+	queue := make(chan *types.TipSet, 10)
 
+	for i := 0; i < 10; i++ {
+		go func() {
+			for ts := range queue {
+				start := time.Now()
+				done, err := ix.indexedTipSet(ts)
+				if err != nil {
+					log.Errorf("failed to check tipset: %s", err)
+				}
+				if !done {
+					if err := ix.processTipSet(ctx, ts); err != nil {
+						log.Errorf("failed to process tipset: %s", err)
+					}
+				} else {
+					//return nil
+				}
+				fmt.Printf("Processing height %d took %s\n", ts.Height(), time.Since(start))
+			}
+		}()
+	}
+
+	defer close(queue)
+
+	for cur.Height() > 0 {
+
+		queue <- cur
 		next, err := ix.api.ChainGetTipSet(ctx, cur.Parents())
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("Processing height %d took %s\n", cur.Height(), time.Since(start))
 		cur = next
 	}
 
