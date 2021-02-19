@@ -142,7 +142,7 @@ func (ix *Indexer) crawlBack(ctx context.Context, cur *types.TipSet) error {
 						log.Errorf("failed to process tipset: %s", err)
 					}
 				} else {
-					//return nil
+					return
 				}
 				fmt.Printf("Processing height %d took %s\n", ts.Height(), time.Since(start))
 			}
