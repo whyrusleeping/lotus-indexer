@@ -68,6 +68,10 @@ func NewIndexer(api api.FullNode, dbd gorm.Dialector) (*Indexer, error) {
 		return nil, err
 	}
 
+	if err := db.AutoMigrate(&DealRecord{}); err != nil {
+		return nil, err
+	}
+
 	return &Indexer{
 		api: api,
 		db:  db,
@@ -75,6 +79,36 @@ func NewIndexer(api api.FullNode, dbd gorm.Dialector) (*Indexer, error) {
 }
 
 func (ix *Indexer) processTipSet(ctx context.Context, ts *types.TipSet) error {
+	if err := ix.processMessages(ctx, ts); err != nil {
+		return err
+	}
+
+	// use four tipsets back to avoid dealing with any reorgs
+	back, err := ix.walkBack(ctx, ts, 4)
+	if err != nil {
+		return err
+	}
+
+	if err := ix.IndexDeals(ctx, back); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ix *Indexer) walkBack(ctx context.Context, ts *types.TipSet, n int) (*types.TipSet, error) {
+	for i := 0; i < n; i++ {
+		next, err := ix.api.ChainGetTipSet(ctx, ts.Parents())
+		if err != nil {
+			return nil, err
+		}
+		ts = next
+	}
+
+	return ts, nil
+}
+
+func (ix *Indexer) processMessages(ctx context.Context, ts *types.TipSet) error {
 	pmsgs, err := ix.api.ChainGetParentMessages(ctx, ts.Cids()[0])
 	if err != nil {
 		return err
