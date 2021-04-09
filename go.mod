@@ -6,7 +6,7 @@ require (
 	github.com/filecoin-project/go-address v0.0.5
 	github.com/filecoin-project/go-state-types v0.1.0
 	github.com/filecoin-project/lotus v1.5.3-rc1.0.20210319182246-43d9cc36a4ea
-	github.com/gorilla/mux v1.8.0
+	github.com/gorilla/mux v1.8.0 // indirect
 	github.com/ipfs/go-cid v0.0.7
 	github.com/ipfs/go-log v1.0.4
 	github.com/labstack/echo/v4 v4.1.17
